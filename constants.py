@@ -26,12 +26,15 @@ GLOBAL_POSITION_HISTORY = 1000
 # Earth radius (Haversine)
 DEFAULT_EARTH_RADIUS_KM = 6371
 
-# ---- Half-Space / Isolation Forest Detector ---- #
-
 # ---- Half-Space Trees (HST) ---- #
-HST_NUM_TREES = 25            # ensemble size
-HST_TREE_HEIGHT = 8           # depth of each tree (leaf count = 2**height)
-HST_INIT_WINDOW = 500         # number of points to collect before initializing offsets
-HST_FEATURE_DIM = 3           # lat, lon, speed
-HST_DEFAULT_SCORE = 0.5       # neutral score before trees are ready
-HST_RANDOM_SEED = 42          # reproducibility
+HST_NUM_TREES = 25
+HST_TREE_HEIGHT = 15
+HST_INIT_WINDOW = 250
+
+# ----  Isolation Forest  ---- #
+IFOREST_N_ESTIMATORS = 100
+IFOREST_MAX_SAMPLES = 256
+IFOREST_WINDOW_SIZE = 500
+IFOREST_RETRAIN_INTERVAL = 100
+
+RANDOM_STATE = 42

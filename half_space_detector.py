@@ -1,4 +1,4 @@
-# half_space_detector_riverml.py
+# half_space_detector.py
 
 from pyflink.datastream.functions import MapFunction
 import numpy as np
@@ -15,16 +15,16 @@ from constants import (
     HST_NUM_TREES,
     HST_TREE_HEIGHT,
     HST_INIT_WINDOW,
-    HST_DEFAULT_SCORE,
-    HST_RANDOM_SEED,
+    RANDOM_STATE,
 )
-from utils import haversine_distance_km
 
 
 class HalfSpaceAnomalyDetector(MapFunction):
     """
     Streaming Half-Space Trees ensemble using River ML implementation.
     Uses MinMaxScaler preprocessing as recommended by River documentation.
+
+    Follows score-then-learn paradigm to avoid train-test leakage.
     """
 
     def __init__(self):
@@ -38,7 +38,7 @@ class HalfSpaceAnomalyDetector(MapFunction):
                 n_trees=HST_NUM_TREES,
                 height=HST_TREE_HEIGHT,
                 window_size=HST_INIT_WINDOW,
-                seed=HST_RANDOM_SEED
+                seed=RANDOM_STATE
             )
         )
 
@@ -47,7 +47,6 @@ class HalfSpaceAnomalyDetector(MapFunction):
         self.warmup_threshold = HST_INIT_WINDOW
         self.ready = False
 
-
     def map(self, json_str: str) -> str:
         start_total = time.perf_counter()
 
@@ -55,12 +54,12 @@ class HalfSpaceAnomalyDetector(MapFunction):
             vehicle: Dict[str, Any] = json.loads(json_str)
             lat = vehicle.get("latitude")
             lon = vehicle.get("longitude")
-            ts = vehicle.get("timestamp", 0)
             speed_kmh = vehicle.get("speed_kmh")
 
             # Pre-check & Default Return
+            # Use None for invalid data to exclude from evaluation
             if lat is None or lon is None:
-                vehicle["half_space_score"] = HST_DEFAULT_SCORE
+                vehicle["half_space_score"] = None
                 vehicle["half_space_compute_ms"] = 0.0
                 return json.dumps(vehicle)
 
@@ -72,7 +71,10 @@ class HalfSpaceAnomalyDetector(MapFunction):
                 'speed_kmh': float(speed_kmh)
             }
 
-            # Warm-up phase: just learn without scoring
+            # -----------------------------
+            # 1. Warm-up Phase
+            # -----------------------------
+            # Just learn without scoring during warm-up
             if not self.ready:
                 self.model.learn_one(features)
                 self.warmup_count += 1
@@ -80,18 +82,21 @@ class HalfSpaceAnomalyDetector(MapFunction):
                 if self.warmup_count >= self.warmup_threshold:
                     self.ready = True
 
-                compute_ms = (time.perf_counter() - start_total) * 1000.0
-                vehicle["half_space_score"] = HST_DEFAULT_SCORE
-                vehicle["half_space_compute_ms"] = float(compute_ms)
+                # Use None during warm-up to exclude from evaluation
+                vehicle["half_space_score"] = None
+                vehicle["half_space_compute_ms"] = None
+                vehicle["half_space_warmup"] = True
                 return json.dumps(vehicle)
 
-            # Scoring phase (after warm-up)
+            # -----------------------------
+            # 2. Scoring Phase (after warm-up)
+            # -----------------------------
             start_compute = time.perf_counter()
 
-            # Get anomaly score
+            # Score FIRST (before learning) to avoid train-test leakage
             score = self.model.score_one(features)
 
-            # Update model with new observation
+            # THEN update model with new observation
             self.model.learn_one(features)
 
             end_compute = time.perf_counter()
@@ -102,18 +107,15 @@ class HalfSpaceAnomalyDetector(MapFunction):
             vehicle["half_space_score"] = float(score)
             vehicle["half_space_compute_ms"] = float(compute_ms)
             vehicle["half_space_total_map_ms"] = float(total_ms)
+            vehicle["half_space_warmup"] = False
 
             return json.dumps(vehicle)
 
         except Exception as e:
-            # On error, return input unchanged with neutral score
-            try:
-                vehicle = json.loads(json_str)
-                vehicle["half_space_score"] = HST_DEFAULT_SCORE
-                vehicle["half_space_compute_ms"] = 0.0
-                # Optional: Log exception for debugging
-                # print(f"Error in HalfSpaceAnomalyDetector: {e}")
-                return json.dumps(vehicle)
-            except Exception:
-                # If parsing fails, return original string
-                return json_str
+            # On error, return input unchanged with None score to exclude from evaluation
+            vehicle = json.loads(json_str)
+            vehicle["half_space_score"] = None
+            vehicle["half_space_compute_ms"] = None
+            # Log exception for debugging
+            print(f"Error in HalfSpaceAnomalyDetector: {e}")
+            return json.dumps(vehicle)
