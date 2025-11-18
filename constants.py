@@ -41,8 +41,12 @@ RANDOM_STATE = 42
 
 
 # ----  DBSCAN  ---- #
-# Recommended: minPts = dimensions + 1
 DBSCAN_MIN_SAMPLES = 4              # 3 dimensions + 1
 DBSCAN_EPS = 0.5                    # Epsilon radius (may need tuning)
 DBSCAN_WINDOW_SIZE = 500
 DBSCAN_UPDATE_INTERVAL = 100        # Recluster frequency
+
+# ----  LOF  ---- #
+LOF_N_NEIGHBORS = 20                # Standard recommendation from sklearn
+LOF_WINDOW_SIZE = 500               # Match other algorithms
+LOF_UPDATE_INTERVAL = 100           # Retrain frequency
