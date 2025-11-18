@@ -32,6 +32,7 @@ class CSVAnomalyFormatter(MapFunction):
             # Extract common fields
             timestamp = vehicle.get('timestamp', '')
             vehicle_id = vehicle.get('vehicle_id', 'unknown')
+            route_id = vehicle.get('route_id', 'unknown')
             lat = vehicle.get('latitude', 0.0)
             lon = vehicle.get('longitude', 0.0)
             speed_kmh = vehicle.get('speed_kmh', 0.0)
@@ -82,6 +83,7 @@ class CSVAnomalyFormatter(MapFunction):
             csv_row = (
                 f"{timestamp},"
                 f"{vehicle_id},"
+                f"{route_id},"
                 f"{fmt(lat)},"
                 f"{fmt(lon)},"
                 f"{fmt(speed_kmh)},"

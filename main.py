@@ -1,5 +1,4 @@
 # main.py
-
 from pyflink.datastream import StreamExecutionEnvironment, RuntimeExecutionMode
 from pyflink.common.typeinfo import Types
 from pyflink.java_gateway import get_gateway
@@ -123,7 +122,7 @@ def main():
 
     # --- CSV File Sink Setup ---
     csv_header = (
-        "timestamp,vehicle_id,latitude,longitude,speed_kmh,"
+        "timestamp,vehicle_id,route_id,latitude,longitude,speed_kmh,"
         "rule_anomaly,rule_anomaly_types,"
         "half_space_score,half_space_compute_ms,"
         "iforest_score,iforest_compute_ms,"
