@@ -1,4 +1,4 @@
-# dbscan_detector_with_speed.py
+# dbscan_detector_with_speed.py (CORRECTED)
 
 from pyflink.datastream.functions import MapFunction
 import numpy as np
@@ -6,166 +6,215 @@ import json
 import time
 from sklearn.cluster import DBSCAN
 from sklearn.preprocessing import StandardScaler
-from typing import Dict, Any, List, Tuple
-from collections import deque
+from typing import Dict, Any, List
+from scipy.spatial.distance import cdist
 
-from utils import haversine_distance_km
+from constants import (
+    DBSCAN_EPS,
+    DBSCAN_MIN_SAMPLES,
+    DBSCAN_WINDOW_SIZE,
+    DBSCAN_UPDATE_INTERVAL,
+)
 
 
 class DBSCANAnomalyDetector(MapFunction):
     """
     Detects anomalies by identifying points labeled as 'noise' by the DBSCAN 
     clustering algorithm using lat, lon, and speed features.
-    Includes timing for the clustering step.
     """
 
     def __init__(self):
-        # Store recent (vehicle_id, lat, lon, speed, timestamp) tuples
-        self.history_data: List[Tuple[str, float, float, float, float]] = []
-        self.window_size = 500  # Number of points to cluster
-        self.update_interval = 100  # Recalculate clusters every 100 points
-        self.counter = 0
-
-        # Track last points for speed calculation (per vehicle)
-        self.vehicle_last_points: Dict[str, deque] = {}
+        # Store recent (lat, lon, speed) tuples for clustering
+        self.history_data: List[List[float]] = []
+        self.window_size = DBSCAN_WINDOW_SIZE
+        self.update_interval = DBSCAN_UPDATE_INTERVAL
+        self.sample_count = 0
+        self.last_cluster_count = 0
 
         # DBSCAN parameters
-        # Epsilon radius (adjusted for standardized 3D space)
-        self.eps = 0.5
-        self.min_samples = 5    # Minimum points for a core point
+        self.eps = DBSCAN_EPS
+        self.min_samples = DBSCAN_MIN_SAMPLES
 
-        # Initialize the label for the current point
-        self.last_computed_label = 0
+        # Cluster labels from last clustering run
+        self.current_labels = None
+        self.ready = False
 
-        # StandardScaler for feature normalization (critical for 3D clustering)
+        # StandardScaler for feature normalization
+        # Need to refit periodically for concept drift
         self.scaler = StandardScaler()
-        self.scaler_fitted = False
+        self.scaler_update_interval = DBSCAN_UPDATE_INTERVAL
+        self.last_scaler_update = 0
 
-    def _calc_speed_kmh(self, vehicle_id: str, lat: float, lon: float, ts: float) -> float:
-        """
-        Calculate speed for a specific vehicle using its last known position.
-        """
-        if vehicle_id not in self.vehicle_last_points:
-            self.vehicle_last_points[vehicle_id] = deque(maxlen=2)
+    def _update_scaler(self, data: np.ndarray):
+        """Refit scaler to adapt to concept drift."""
+        if len(data) >= self.min_samples:
+            self.scaler.fit(data)
+            self.last_scaler_update = self.sample_count
 
-        last_point = self.vehicle_last_points[vehicle_id]
-
-        if len(last_point) < 1:
-            return 0.0
-
-        prev = last_point[-1]
-        prev_lat, prev_lon, prev_ts = prev
-
-        if prev_ts is None or ts is None or (ts == prev_ts):
-            return 0.0
-
-        dist_km = haversine_distance_km(prev_lat, prev_lon, lat, lon)
-        time_s = abs(ts - prev_ts)
-
-        if time_s == 0:
-            return 0.0
-
-        return (dist_km / time_s) * 3600.0
-
-    def _cluster_and_label(self, data: np.ndarray) -> np.ndarray:
+    def _cluster_data(self, data: np.ndarray) -> np.ndarray:
         """
         Runs DBSCAN on standardized 3D features (lat, lon, speed).
-        Returns the cluster labels for all points in the window.
+        Returns cluster labels for all points in the window.
         """
-        # Standardize features to ensure all dimensions contribute equally
-        if not self.scaler_fitted:
-            data_scaled = self.scaler.fit_transform(data)
-            self.scaler_fitted = True
-        else:
-            data_scaled = self.scaler.transform(data)
+        if len(data) < self.min_samples:
+            return np.array([-1] * len(data))
 
+        # Standardize features
+        data_scaled = self.scaler.transform(data)
+
+        # Run DBSCAN
         db = DBSCAN(eps=self.eps, min_samples=self.min_samples)
         labels = db.fit_predict(data_scaled)
         return labels
 
-    def map(self, json_str: str) -> str:
-        start_total = time.perf_counter()
-        compute_ms = 0.0
+    def _get_anomaly_score(self, label: int, all_labels: np.ndarray) -> float:
+        """
+        Convert DBSCAN label to continuous anomaly score for fair comparison.
 
+        Score interpretation:
+        - label == -1 (noise): High anomaly score (1.0)
+        - label in small cluster: Medium anomaly score (0.5 to 0.9)
+        - label in large cluster: Low anomaly score (0.0 to 0.5)
+
+        This makes DBSCAN scores comparable to IForest and HST.
+        """
+        if label == -1:
+            # Noise point = definite anomaly
+            return 1.0
+
+        # Calculate cluster size
+        cluster_size = np.sum(all_labels == label)
+        total_points = len(all_labels)
+
+        # Smaller clusters = more anomalous
+        # Normalize: [0, total_points] -> [0.9, 0.0]
+        normalized_size = cluster_size / total_points
+        anomaly_score = max(0.0, 0.9 - (normalized_size * 0.9))
+
+        return float(anomaly_score)
+
+    def map(self, json_str: str) -> str:
         try:
             vehicle: Dict[str, Any] = json.loads(json_str)
-            vehicle_id = vehicle.get('vehicle_id', 'unknown')
             lat = vehicle.get('latitude')
             lon = vehicle.get('longitude')
-            ts = vehicle.get('timestamp', 0)
+            speed_kmh = vehicle.get('speed_kmh')
 
-            # --- Pre-check ---
-            if lat is None or lon is None:
-                vehicle['dbscan_is_anomaly'] = False
-                vehicle['dbscan_label'] = self.last_computed_label
-                vehicle['dbscan_compute_ms'] = 0.0
+            # Check valid data
+            if lat is None or lon is None or speed_kmh is None:
+                vehicle['dbscan_score'] = None
+                vehicle['dbscan_compute_ms'] = None
                 return json.dumps(vehicle)
 
-            # --- Calculate Speed ---
-            speed_kmh = self._calc_speed_kmh(vehicle_id, lat, lon, ts)
+            # Feature vector
+            current_point = [float(lat), float(lon), float(speed_kmh)]
 
-            # Update vehicle's last point for future speed calculations
-            if vehicle_id not in self.vehicle_last_points:
-                self.vehicle_last_points[vehicle_id] = deque(maxlen=2)
-            self.vehicle_last_points[vehicle_id].append(
-                [float(lat), float(lon), float(ts)])
+            self.sample_count += 1
 
-            # --- Data Maintenance ---
-            # Store the data point: (vehicle_id, lat, lon, speed, timestamp)
-            self.history_data.append(
-                (vehicle_id, float(lat), float(lon), float(speed_kmh), float(ts)))
+            # -----------------------------
+            # 1. Warm-up Phase
+            # -----------------------------
+            if not self.ready:
+                # Collect initial data
+                self.history_data.append(current_point)
+
+                # Maintain window size
+                if len(self.history_data) > self.window_size:
+                    self.history_data.pop(0)
+
+                # Initialize when we have enough data
+                if len(self.history_data) >= self.window_size:
+                    # Fit scaler on initial window
+                    coords = np.array(self.history_data)
+                    self._update_scaler(coords)
+
+                    # Run initial clustering
+                    self.current_labels = self._cluster_data(coords)
+                    self.ready = True
+                    self.last_cluster_count = self.sample_count
+
+                # Return None during warm-up
+                vehicle['dbscan_score'] = None
+                vehicle['dbscan_compute_ms'] = None
+                return json.dumps(vehicle)
+
+            # -----------------------------
+            # 2. Scoring Phase (model ready)
+            # -----------------------------
+
+            start_compute = time.perf_counter()
+
+            # Transform current point using existing scaler
+            current_scaled = self.scaler.transform(
+                np.array([current_point])
+            )
+
+            # Find which cluster this point would belong to
+            # Use existing cluster labels to determine score
+            if self.current_labels is not None and len(self.current_labels) > 0:
+                # Calculate distance to all points in history
+                history_scaled = self.scaler.transform(
+                    np.array(self.history_data)
+                )
+
+                # Find nearest neighbors within eps radius
+                distances = cdist(
+                    current_scaled, history_scaled, metric='euclidean')[0]
+                neighbors = np.sum(distances <= self.eps)
+
+                if neighbors < self.min_samples:
+                    # Not enough neighbors = noise = anomaly
+                    predicted_label = -1
+                else:
+                    # Assign to most common label among neighbors
+                    neighbor_indices = np.where(distances <= self.eps)[0]
+                    neighbor_labels = self.current_labels[neighbor_indices]
+                    # Filter out noise labels
+                    valid_labels = neighbor_labels[neighbor_labels != -1]
+                    if len(valid_labels) > 0:
+                        predicted_label = np.bincount(valid_labels).argmax()
+                    else:
+                        predicted_label = -1
+
+                # Convert label to continuous score
+                anomaly_score = self._get_anomaly_score(
+                    predicted_label,
+                    self.current_labels
+                )
+            else:
+                anomaly_score = None
+
+            end_compute = time.perf_counter()
+            compute_ms = (end_compute - start_compute) * 1000.0
+
+            # Add current point to history (after scoring)
+            self.history_data.append(current_point)
 
             # Maintain window size
             if len(self.history_data) > self.window_size:
                 self.history_data.pop(0)
 
-            self.counter += 1
-            is_anomaly = False
-            current_label = self.last_computed_label
+            # Periodic reclustering (after scoring)
+            samples_since_cluster = self.sample_count - self.last_cluster_count
+            if samples_since_cluster >= self.update_interval:
+                coords = np.array(self.history_data)
 
-            # --- Clustering and Anomaly Check ---
-            if self.counter % self.update_interval == 0 and len(self.history_data) >= self.min_samples:
+                # Update scaler for concept drift
+                self._update_scaler(coords)
 
-                # Extract features: [lat, lon, speed]
-                # Note: Using same order as HST for consistency
-                coords = np.array([[item[1], item[2], item[3]]
-                                  for item in self.history_data])
+                # Recluster
+                self.current_labels = self._cluster_data(coords)
+                self.last_cluster_count = self.sample_count
 
-                # --- Start Compute Timing ---
-                start_compute = time.perf_counter()
-
-                labels = self._cluster_and_label(coords)
-
-                end_compute = time.perf_counter()
-                # --- End Compute Timing ---
-
-                compute_ms = (end_compute - start_compute) * 1000.0
-
-                # Check the label for the last point added (the current vehicle)
-                current_label = int(labels[-1])
-                self.last_computed_label = current_label
-
-                # Label -1 means noise (anomaly) in DBSCAN
-                if current_label == -1:
-                    is_anomaly = True
-
-            # --- Output Formatting ---
-            vehicle['dbscan_is_anomaly'] = is_anomaly
-            vehicle['dbscan_label'] = current_label
-            vehicle['dbscan_compute_ms'] = float(compute_ms)
-            vehicle['dbscan_total_map_ms'] = (
-                time.perf_counter() - start_total) * 1000.0
+            vehicle['dbscan_score'] = anomaly_score
+            vehicle['dbscan_compute_ms'] = compute_ms
 
             return json.dumps(vehicle)
 
         except Exception as e:
-            # On error, return input unchanged with default values
-            try:
-                if 'vehicle' in locals():
-                    vehicle['dbscan_is_anomaly'] = False
-                    vehicle['dbscan_label'] = self.last_computed_label
-                    vehicle['dbscan_compute_ms'] = 0.0
-                    return json.dumps(vehicle)
-                return json_str
-            except Exception:
-                return json_str
+            # Fallback behavior
+            vehicle = json.loads(json_str)
+            vehicle['dbscan_score'] = None
+            vehicle['dbscan_compute_ms'] = None
+            print(f"Error in DBSCANAnomalyDetector: {e}")
+            return json.dumps(vehicle)

@@ -38,3 +38,11 @@ IFOREST_WINDOW_SIZE = 500
 IFOREST_RETRAIN_INTERVAL = 100
 
 RANDOM_STATE = 42
+
+
+# ----  DBSCAN  ---- #
+# Recommended: minPts = dimensions + 1
+DBSCAN_MIN_SAMPLES = 4              # 3 dimensions + 1
+DBSCAN_EPS = 0.5                    # Epsilon radius (may need tuning)
+DBSCAN_WINDOW_SIZE = 500
+DBSCAN_UPDATE_INTERVAL = 100        # Recluster frequency
