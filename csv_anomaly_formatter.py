@@ -1,94 +1,158 @@
-# anomaly_logger.py (CSVAnomalyFormatter) - REVISED
+# csv_anomaly_formatter.py (IMPROVED)
 
-import json
 from pyflink.datastream.functions import MapFunction
+import json
 from typing import Dict, Any
 
 
 class CSVAnomalyFormatter(MapFunction):
     """
-    Formats the final enriched JSON string into a single CSV row, 
-    including scores, compute times, and the specific rule-based anomaly types.
+    Formats enriched vehicle data into CSV format for output.
+
+    Options for handling warm-up period:
+    1. SKIP_WARMUP: Only output samples where all algorithms have valid scores
+    2. INCLUDE_ALL: Output all samples, marking warm-up status
+
+    Default: SKIP_WARMUP for clean comparison data
     """
 
-    # Define simple anomaly thresholds for filtering the output
-    HST_SCORE_ANOMALY_THRESHOLD = 0.5
-    IFOREST_SCORE_ANOMALY_THRESHOLD = 0.5
-    LOF_SCORE_ANOMALY_THRESHOLD = 1.05
+    def __init__(self, mode='SKIP_WARMUP'):
+        """
+        Args:
+            mode: 'SKIP_WARMUP' or 'INCLUDE_ALL'
+        """
+        self.mode = mode
+        self.sample_count = 0
 
     def map(self, json_str: str) -> str:
         try:
             vehicle: Dict[str, Any] = json.loads(json_str)
+            self.sample_count += 1
 
-            # --- 1. Extract Scores, Flags, and Types ---
+            # Extract common fields
+            timestamp = vehicle.get('timestamp', '')
+            vehicle_id = vehicle.get('vehicle_id', 'unknown')
+            lat = vehicle.get('latitude', 0.0)
+            lon = vehicle.get('longitude', 0.0)
+            speed_kmh = vehicle.get('speed_kmh', 0.0)
 
-            # Rule-Based (Ground Labeller)
-            is_rule_anomaly = vehicle.get('is_anomaly', False)
-            # The list of anomaly types (e.g., ['SPEED', 'STATIONARY']) joined by ','
-            rule_anomaly_types = ','.join(vehicle.get('anomalies', []))
+            # Extract rule-based detection
+            rule_anomaly = vehicle.get('is_anomaly', False)
+            rule_types = ','.join(vehicle.get('anomalies', [])) if vehicle.get(
+                'anomalies') else 'none'
 
-            # Half-Space Tree (HST)
-            hs_score = vehicle.get('half_space_score', 0.0)
-            hs_compute = vehicle.get('half_space_compute_ms', 0.0)
-            is_hs_anomaly = hs_score > self.HST_SCORE_ANOMALY_THRESHOLD
+            # Extract ML detector scores
+            hst_score = vehicle.get('half_space_score')
+            hst_ms = vehicle.get('half_space_compute_ms')
 
-            # Isolation Forest (iForest)
-            if_score = vehicle.get('iforest_score', 0.0)
-            if_compute = vehicle.get('iforest_compute_ms', 0.0)
-            is_if_anomaly = if_score > self.IFOREST_SCORE_ANOMALY_THRESHOLD
+            iforest_score = vehicle.get('iforest_score')
+            iforest_ms = vehicle.get('iforest_compute_ms')
 
-            # LOF (Local Outlier Factor)
-            lof_score = vehicle.get('lof_score', 1.0)
-            lof_compute = vehicle.get('lof_compute_ms', 0.0)
-            is_lof_anomaly = lof_score > self.LOF_SCORE_ANOMALY_THRESHOLD
+            lof_score = vehicle.get('lof_score')
+            lof_ms = vehicle.get('lof_compute_ms')
 
-            # DBSCAN
-            db_label = vehicle.get('dbscan_label', 0)
-            db_compute = vehicle.get('dbscan_compute_ms', 0.0)
-            is_db_anomaly = db_label == -1
+            dbscan_score = vehicle.get('dbscan_score')
+            dbscan_ms = vehicle.get('dbscan_compute_ms')
 
-            # --- 2. Filter Output ---
+            # Check if all ML scores are valid (not None)
+            all_scores_valid = all([
+                hst_score is not None,
+                iforest_score is not None,
+                lof_score is not None,
+                dbscan_score is not None
+            ])
 
-            # Output only if at least one detector flags it as an anomaly
-            if not (is_rule_anomaly or is_hs_anomaly or is_if_anomaly or is_lof_anomaly or is_db_anomaly):
-                return ""
+            # Handle based on mode
+            if self.mode == 'SKIP_WARMUP':
+                # Skip samples during warm-up
+                if not all_scores_valid:
+                    return ""  # Empty string = filtered out
 
-            # --- 3. Format CSV Record ---
+            # Format values (handle None gracefully)
+            def fmt(val, default='NA'):
+                if val is None:
+                    return default
+                if isinstance(val, bool):
+                    return str(val)
+                if isinstance(val, float):
+                    return f"{val:.6f}"
+                return str(val)
 
-            # NEW CSV Header Structure:
-            # timestamp,vehicle_id,latitude,longitude,rule_anomaly,rule_anomaly_types,
-            # half_space_score,half_space_compute_ms,
-            # iforest_score,iforest_compute_ms,
-            # lof_score,lof_compute_ms,
-            # dbscan_label,dbscan_compute_ms
-
+            # Build CSV row
             csv_row = (
-                f"{vehicle.get('timestamp', '')},"
-                f"{vehicle.get('vehicle_id', 'UNKNOWN')},"
-                f"{vehicle.get('route_id', 'UNKNOWN')},"
-                f"{vehicle.get('latitude', 0.0):.6f},"
-                f"{vehicle.get('longitude', 0.0):.6f},"
-                f"{1 if is_rule_anomaly else 0},"
-                f"{rule_anomaly_types},"  # <-- NEW FIELD HERE
-
-                # HST Fields
-                f"{hs_score:.6f},"
-                f"{hs_compute:.3f},"
-
-                # iForest Fields
-                f"{if_score:.6f},"
-                f"{if_compute:.3f},"
-
-                # LOF Fields
-                f"{lof_score:.6f},"
-                f"{lof_compute:.3f},"
-
-                # DBSCAN Fields
-                f"{db_label},"
-                f"{db_compute:.3f}"
+                f"{timestamp},"
+                f"{vehicle_id},"
+                f"{fmt(lat)},"
+                f"{fmt(lon)},"
+                f"{fmt(speed_kmh)},"
+                f"{rule_anomaly},"
+                f"{rule_types},"
+                f"{fmt(hst_score)},"
+                f"{fmt(hst_ms)},"
+                f"{fmt(iforest_score)},"
+                f"{fmt(iforest_ms)},"
+                f"{fmt(lof_score)},"
+                f"{fmt(lof_ms)},"
+                f"{fmt(dbscan_score)},"
+                f"{fmt(dbscan_ms)},"
             )
 
             return csv_row
 
-        except Exception:
-            return ""
+        except Exception as e:
+            print(f"Error in CSVAnomalyFormatter: {e}")
+            return ""  # Return empty string on error
+
+
+class CSVAnomalyFormatterDebug(MapFunction):
+    """
+    Debug version that outputs statistics about warm-up periods.
+    Use this to verify all algorithms are warming up correctly.
+    """
+
+    def __init__(self):
+        self.total_samples = 0
+        self.hst_ready = 0
+        self.iforest_ready = 0
+        self.lof_ready = 0
+        self.dbscan_ready = 0
+        self.all_ready = 0
+
+    def map(self, json_str: str) -> str:
+        vehicle = json.loads(json_str)
+        self.total_samples += 1
+
+        # Count ready algorithms
+        if vehicle.get('half_space_score') is not None:
+            self.hst_ready += 1
+        if vehicle.get('iforest_score') is not None:
+            self.iforest_ready += 1
+        if vehicle.get('lof_score') is not None:
+            self.lof_ready += 1
+        if vehicle.get('dbscan_score') is not None:
+            self.dbscan_ready += 1
+
+        # Count when all are ready
+        if all([
+            vehicle.get('half_space_score') is not None,
+            vehicle.get('iforest_score') is not None,
+            vehicle.get('lof_score') is not None,
+            vehicle.get('dbscan_score') is not None
+        ]):
+            self.all_ready += 1
+
+        # Print statistics every 100 samples
+        if self.total_samples % 100 == 0:
+            print(f"\n📊 Warm-up Statistics (Sample {self.total_samples}):")
+            print(
+                f"   HST ready:     {self.hst_ready}/{self.total_samples} ({self.hst_ready/self.total_samples*100:.1f}%)")
+            print(
+                f"   IForest ready: {self.iforest_ready}/{self.total_samples} ({self.iforest_ready/self.total_samples*100:.1f}%)")
+            print(
+                f"   LOF ready:     {self.lof_ready}/{self.total_samples} ({self.lof_ready/self.total_samples*100:.1f}%)")
+            print(
+                f"   DBSCAN ready:  {self.dbscan_ready}/{self.total_samples} ({self.dbscan_ready/self.total_samples*100:.1f}%)")
+            print(
+                f"   All ready:     {self.all_ready}/{self.total_samples} ({self.all_ready/self.total_samples*100:.1f}%)")
+
+        return json_str  # Pass through unchanged

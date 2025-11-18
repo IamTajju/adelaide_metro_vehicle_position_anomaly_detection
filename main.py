@@ -1,4 +1,4 @@
-# main.py (Updated for All Detectors and Compute Times)
+# main.py
 
 from pyflink.datastream import StreamExecutionEnvironment, RuntimeExecutionMode
 from pyflink.common.typeinfo import Types
@@ -13,11 +13,19 @@ from append_speed_to_stream import AppendSpeedToStream
 from dbscan_detector import DBSCANAnomalyDetector
 from half_space_detector import HalfSpaceAnomalyDetector
 from isolation_forest_detector import IsolationForestAnomalyDetector
-from lof_detector import LOFAnomalyDetector  # Now with compute time tracking
+from lof_detector import LOFAnomalyDetector
 from decode_gtfs_feed import decode_gtfs_feed
 from rule_based_anomaly_detector import RuleBasedAnomalyDetector
 from csv_anomaly_formatter import CSVAnomalyFormatter
 from stream_logger import StreamDataLogger
+
+# Import constants for warm-up info
+from constants import (
+    HST_INIT_WINDOW,
+    IFOREST_WINDOW_SIZE,
+    DBSCAN_WINDOW_SIZE,
+    LOF_MIN_SAMPLES,
+)
 
 # ==================== Main Pipeline ====================
 
@@ -27,10 +35,19 @@ def main():
     print("Adelaide Metro Real-time Anomaly Detection System (Multi-Algorithm)")
     print("=" * 80)
 
+    # Display warm-up periods for all algorithms
+    print("\n📊 Algorithm Warm-up Periods:")
+    print(f"   - Half-Space Trees (HST):  {HST_INIT_WINDOW} samples")
+    print(f"   - Isolation Forest:        {IFOREST_WINDOW_SIZE} samples")
+    print(f"   - DBSCAN:                  {DBSCAN_WINDOW_SIZE} samples")
+    print(f"   - LOF:                     {LOF_MIN_SAMPLES} samples")
+    max_warmup = max(HST_INIT_WINDOW, IFOREST_WINDOW_SIZE,
+                     DBSCAN_WINDOW_SIZE, LOF_MIN_SAMPLES)
+    print(f"   ⚠️  Valid comparisons start after sample {max_warmup}\n")
+
     # Setup Flink environment
     env = StreamExecutionEnvironment.get_execution_environment()
     env.set_runtime_mode(RuntimeExecutionMode.STREAMING)
-
     env.set_parallelism(1)
 
     # Add your compiled JAR
@@ -44,87 +61,104 @@ def main():
     j_stream = j_env.addSource(j_source)
     stream = DataStream(j_stream)
 
-    # Build the pipeline
+    # ==================== Pipeline Stages ====================
+
+    # Stage 1: Decode GTFS feed
     decoded_stream = stream.flat_map(
         decode_gtfs_feed,
         output_type=Types.STRING()
     )
 
-    # Print data logs and summary statistics
-    decoded_stream.map(
-        StreamDataLogger()
-    )
+    # Stage 2: Log data (optional monitoring)
+    decoded_stream.map(StreamDataLogger())
 
-    enriched_stream = decoded_stream
-
-    # Append Vehicle speed to Stream
+    # Stage 3: Enrich with vehicle speed
     enriched_stream = decoded_stream.map(
         AppendSpeedToStream(),
         output_type=Types.STRING()
     )
 
-    # A. Apply Rule-Based Detector (adds 'anomalies' list and 'is_anomaly' flag)
+    # Stage 4: Apply Rule-Based Detector
+    # (adds 'anomalies' list and 'is_anomaly' flag)
     enriched_stream = enriched_stream.map(
         RuleBasedAnomalyDetector(),
         output_type=Types.STRING()
     )
 
-    # B. Apply Half-Space Detector (adds 'half_space_score' and 'half_space_compute_ms')
+    # ==================== ML Anomaly Detectors ====================
+    # All detectors process sequentially, each adding their scores
+    # Note: Order doesn't affect results since each detector is independent
+
+    # Stage 5A: Half-Space Trees (streaming algorithm)
     enriched_stream = enriched_stream.map(
         HalfSpaceAnomalyDetector(),
         output_type=Types.STRING()
     )
 
-    # C. Apply Isolation Forest Detector (adds 'iforest_score' and 'iforest_compute_ms')
+    # Stage 5B: Isolation Forest (sliding window)
     enriched_stream = enriched_stream.map(
         IsolationForestAnomalyDetector(),
         output_type=Types.STRING()
     )
 
-    # D. Apply LOF Detector (adds 'lof_score' and 'lof_compute_ms')
+    # Stage 5C: Local Outlier Factor (sliding window)
     enriched_stream = enriched_stream.map(
         LOFAnomalyDetector(),
         output_type=Types.STRING()
     )
 
-    # E. Apply DBSCAN Detector (adds 'dbscan_is_anomaly' flag and 'dbscan_compute_ms')
+    # Stage 5D: DBSCAN (sliding window clustering)
     enriched_stream = enriched_stream.map(
         DBSCANAnomalyDetector(),
         output_type=Types.STRING()
     )
 
-    # Filter and format output to CSV (only anomalies included)
+    # ==================== Output Formatting ====================
+
+    # Stage 6: Format to CSV (filters for valid scores)
     csv_output = enriched_stream.map(
         CSVAnomalyFormatter(),
         output_type=Types.STRING()
     )
 
     # --- CSV File Sink Setup ---
-    # Define the comprehensive CSV Header
     csv_header = (
-        "timestamp,vehicle_id,latitude,longitude,rule_anomaly,rule_anomaly_types,"
+        "timestamp,vehicle_id,latitude,longitude,speed_kmh,"
+        "rule_anomaly,rule_anomaly_types,"
         "half_space_score,half_space_compute_ms,"
         "iforest_score,iforest_compute_ms,"
         "lof_score,lof_compute_ms,"
-        "dbscan_label,dbscan_compute_ms"
+        "dbscan_score,dbscan_compute_ms"
     )
 
+    output_path = '/Users/tajju/Desktop/Assignments/COMP7707/ahme0423_A3/a3_prototype/output'
+
     sink = (FileSink
-            .for_row_format('/Users/tajju/Desktop/Assignments/COMP7707/ahme0423_A3/a3_prototype/output', Encoder.simple_string_encoder("UTF-8"))
+            .for_row_format(output_path, Encoder.simple_string_encoder("UTF-8"))
             .with_rolling_policy(RollingPolicy.default_rolling_policy(
-                part_size=1024 ** 3,
-                rollover_interval=15 * 60 * 1000,
-                inactivity_interval=5 * 60 * 1000))
+                part_size=1024 ** 3,              # 1GB file size
+                rollover_interval=15 * 60 * 1000,  # 15 minutes
+                inactivity_interval=5 * 60 * 1000))  # 5 minutes
             .build())
 
-    # Filter out empty strings (non-anomalous points) before sinking
+    # Filter out empty strings (warmup samples or invalid data)
     csv_output.filter(lambda x: len(x) > 0).sink_to(sink)
 
-    print("\n🚀 Starting anomaly detection pipeline...")
-    print(f"✅ CSV Header (Must be manually added to file): {csv_header}")
-    print("👀 Monitoring for anomalies and writing results to CSV...\n")
+    # ==================== Execution ====================
 
-    # Execute
+    print("\n🚀 Starting anomaly detection pipeline...")
+    print(f"📁 Output directory: {output_path}")
+    print(f"✅ CSV Header (add manually to output file):")
+    print(f"   {csv_header}")
+    print("\n⏳ Pipeline stages:")
+    print("   1. Decode GTFS feed")
+    print("   2. Enrich with speed calculations")
+    print("   3. Rule-based detection")
+    print("   4. ML detectors (HST → IForest → LOF → DBSCAN)")
+    print("   5. Format and write to CSV")
+    print("\n👀 Monitoring for anomalies...\n")
+
+    # Execute pipeline
     env.execute("Adelaide Metro Anomaly Detection (Multi-Algorithm)")
 
 

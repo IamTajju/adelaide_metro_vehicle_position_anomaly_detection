@@ -9,6 +9,7 @@ from typing import List, Dict, Any
 import warnings
 
 from constants import (
+    LOF_MIN_SAMPLES,
     LOF_N_NEIGHBORS,
     LOF_WINDOW_SIZE,
     LOF_UPDATE_INTERVAL,
@@ -41,7 +42,7 @@ class LOFAnomalyDetector(MapFunction):
 
         # LOF Hyperparameters
         self.n_neighbors: int = LOF_N_NEIGHBORS
-        self.min_samples: int = max(self.n_neighbors + 1, 50)
+        self.min_samples: int = LOF_MIN_SAMPLES
 
         # LOF model (trained on history, predicts on new points)
         self.lof_model: LocalOutlierFactor = None

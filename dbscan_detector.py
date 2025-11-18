@@ -1,4 +1,4 @@
-# dbscan_detector_with_speed.py (CORRECTED)
+# dbscan_detector.py
 
 from pyflink.datastream.functions import MapFunction
 import numpy as np
