@@ -26,27 +26,29 @@ GLOBAL_POSITION_HISTORY = 1000
 # Earth radius (Haversine)
 DEFAULT_EARTH_RADIUS_KM = 6371
 
+RANDOM_STATE = 42
+UNIFIED_WARMUP = 500
+
 # ---- Half-Space Trees (HST) ---- #
 HST_NUM_TREES = 25
 HST_TREE_HEIGHT = 15
-HST_INIT_WINDOW = 250
+HST_INIT_WINDOW = UNIFIED_WARMUP
 
 # ----  Isolation Forest  ---- #
 IFOREST_N_ESTIMATORS = 100
 IFOREST_MAX_SAMPLES = 256
-IFOREST_WINDOW_SIZE = 500
+IFOREST_WINDOW_SIZE = UNIFIED_WARMUP
 IFOREST_RETRAIN_INTERVAL = 100
-
-RANDOM_STATE = 42
 
 
 # ----  DBSCAN  ---- #
 DBSCAN_MIN_SAMPLES = 4              # 3 dimensions + 1
 DBSCAN_EPS = 0.5                    # Epsilon radius (may need tuning)
-DBSCAN_WINDOW_SIZE = 500
+DBSCAN_WINDOW_SIZE = UNIFIED_WARMUP
 DBSCAN_UPDATE_INTERVAL = 100        # Recluster frequency
 
 # ----  LOF  ---- #
 LOF_N_NEIGHBORS = 20                # Standard recommendation from sklearn
-LOF_WINDOW_SIZE = 500               # Match other algorithms
+LOF_WINDOW_SIZE = UNIFIED_WARMUP               # Match other algorithms
 LOF_UPDATE_INTERVAL = 100           # Retrain frequency
+LOF_MIN_SAMPLES = UNIFIED_WARMUP
