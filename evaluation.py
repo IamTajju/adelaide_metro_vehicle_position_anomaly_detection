@@ -1,3 +1,7 @@
+# simple_evaluation.py - Binary Anomaly Detection Evaluation for Adelaide Metro
+# Compares multiple unsupervised anomaly detection algorithms against rule-based ground truth
+# Focuses on anomaly-centric metrics due to severe class imbalance
+
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -227,12 +231,11 @@ class AnomalyDetectionEvaluator:
         # Isolation Forest & LOF: more negative = more anomalous
         iforest_threshold = np.percentile(
             self.df['iforest_score'], 100 - pct_threshold)
-        lof_threshold = np.percentile(
-            self.df['lof_score'], 100 - pct_threshold)
+        lof_threshold = np.percentile(self.df['lof_score'], 100 - pct_threshold)
 
         # Half-Space & DBSCAN: higher values = more anomalous
         half_space_threshold = np.percentile(
-            self.df['half_space_score'], 100 - pct_threshold)
+            self.df['half_space_score'], 100- pct_threshold)
         dbscan_threshold = np.percentile(
             self.df['dbscan_score'], 100 - pct_threshold)
 
